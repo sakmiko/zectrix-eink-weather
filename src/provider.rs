@@ -2699,6 +2699,7 @@ pub fn fetch_open_meteo_grid(
     parse_open_meteo_json(&json, cfg, page_id)
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn parse_open_meteo_json(
     json: &Value,
     cfg: &WeatherProviderConfig,
