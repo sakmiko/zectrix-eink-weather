@@ -1,12 +1,20 @@
 pub mod provider;
 pub mod publisher;
 
+use std::convert::Infallible;
 use std::io::Cursor;
 use std::path::Path;
 
+use embedded_graphics::geometry::{OriginDimensions, Size};
+use embedded_graphics::pixelcolor::BinaryColor;
+use embedded_graphics::prelude::{DrawTarget, Pixel, Point};
 use image::GrayImage;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use u8g2_fonts::FontRenderer;
+use u8g2_fonts::fonts::{u8g2_font_wqy13_t_gb2312, u8g2_font_wqy15_t_gb2312};
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 pub use provider::{
     BUILTIN_LOCATIONS_JSON, DEFAULT_TZ_OFFSET_SECONDS, DailyForecastItem, LocationEntry,
@@ -558,6 +566,12 @@ fn draw_gallery_weather_station(
 }
 
 /// 16×16 高清中文像素点阵字库（覆盖全国 88 个城市/区县、主天气现象与预报标题）
+fn measure_cjk_12(text: &str, gap: i32) -> i32 {
+    let font = FontRenderer::new::<u8g2_font_wqy13_t_gb2312>();
+    measure_u8g2_width(&font, text) + gap
+}
+
+#[allow(dead_code)]
 pub fn cjk_glyph_16x16(ch: char) -> Option<[u16; 16]> {
     match ch {
         '一' => Some([0x0000, 0x0000, 0x0000, 0x0000, 0x7ffc, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000]),
@@ -931,6 +945,7 @@ pub fn cjk_glyph_16x16(ch: char) -> Option<[u16; 16]> {
 }
 
 /// 12×12 精修中文像素点阵字库（用于辅助标签、预警胶囊、风向等）
+#[allow(dead_code)]
 pub fn cjk_glyph_12x12(ch: char) -> Option<[u16; 12]> {
     match ch {
         '一' => Some([0x000, 0x000, 0x000, 0x7ff, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000]),
@@ -1364,6 +1379,50 @@ fn measure_cjk_16(text: &str, gap: i32) -> i32 {
     w
 }
 
+fn draw_u8g2_text<F: u8g2_fonts::Content>(
+    font: &FontRenderer,
+    content: F,
+    x: i32,
+    baseline_y: i32,
+    on: bool,
+    display: &mut FrameDisplay,
+) {
+    let color = if on { BinaryColor::On } else { BinaryColor::Off };
+    let _ = font.render(
+        content,
+        Point::new(x, baseline_y),
+        VerticalPosition::Baseline,
+        FontColor::Transparent(color),
+        display,
+    );
+}
+
+fn draw_u8g2_aligned<F: u8g2_fonts::Content>(
+    font: &FontRenderer,
+    content: F,
+    x: i32,
+    baseline_y: i32,
+    alignment: HorizontalAlignment,
+    on: bool,
+    display: &mut FrameDisplay,
+) {
+    let color = if on { BinaryColor::On } else { BinaryColor::Off };
+    let _ = font.render_aligned(
+        content,
+        Point::new(x, baseline_y),
+        VerticalPosition::Baseline,
+        alignment,
+        FontColor::Transparent(color),
+        display,
+    );
+}
+
+fn measure_u8g2_width(font: &FontRenderer, text: &str) -> i32 {
+    font.get_rendered_dimensions(text, Point::zero(), VerticalPosition::Baseline)
+        .map(|d| d.advance.x)
+        .unwrap_or(0)
+}
+
 fn draw_cjk_16x16(
     disp: &mut FrameDisplay,
     text: &str,
@@ -1373,51 +1432,15 @@ fn draw_cjk_16x16(
     align: TextAlign,
     gap: i32,
 ) -> i32 {
-    if text.is_empty() {
-        return 0;
-    }
-    let tw = measure_cjk_16(text, gap);
-    let mut cx = match align {
-        TextAlign::Left => x,
-        TextAlign::Center => x - tw / 2,
-        TextAlign::Right => x - tw,
+    let font = FontRenderer::new::<u8g2_font_wqy15_t_gb2312>();
+    let baseline_y = y + 14;
+    let alignment = match align {
+        TextAlign::Left => HorizontalAlignment::Left,
+        TextAlign::Center => HorizontalAlignment::Center,
+        TextAlign::Right => HorizontalAlignment::Right,
     };
-    for ch in text.chars() {
-        if ch.is_ascii() {
-            draw_str_7x11(disp, &ch.to_string(), cx, y + 3, on, 1, TextAlign::Left);
-            cx += 8 + gap;
-        } else {
-            if let Some(rows) = cjk_glyph_16x16(ch) {
-                for (ry, bits) in rows.iter().enumerate() {
-                    for rx in 0..16_i32 {
-                        if ((bits >> (15 - rx)) & 1) == 1 {
-                            disp.draw_pixel(cx + rx, y + (ry as i32), on);
-                        }
-                    }
-                }
-            }
-            cx += 16 + gap;
-        }
-    }
-    tw
-}
-
-fn measure_cjk_12(text: &str, gap: i32) -> i32 {
-    let mut w = 0_i32;
-    let chars: Vec<char> = text.chars().collect();
-    for (i, ch) in chars.iter().enumerate() {
-        w += if *ch == ' ' {
-            4
-        } else if ch.is_ascii() {
-            6
-        } else {
-            12
-        };
-        if i + 1 < chars.len() {
-            w += gap;
-        }
-    }
-    w
+    draw_u8g2_aligned(&font, text, x, baseline_y, alignment, on, disp);
+    measure_u8g2_width(&font, text) + gap
 }
 
 fn draw_cjk_12x12(
@@ -1429,35 +1452,20 @@ fn draw_cjk_12x12(
     align: TextAlign,
     gap: i32,
 ) -> i32 {
-    if text.is_empty() {
-        return 0;
-    }
-    let tw = measure_cjk_12(text, gap);
-    let mut cx = match align {
-        TextAlign::Left => x,
-        TextAlign::Center => x - tw / 2,
-        TextAlign::Right => x - tw,
+    let font = FontRenderer::new::<u8g2_font_wqy13_t_gb2312>();
+    let baseline_y = y + 11;
+    let alignment = match align {
+        TextAlign::Left => HorizontalAlignment::Left,
+        TextAlign::Center => HorizontalAlignment::Center,
+        TextAlign::Right => HorizontalAlignment::Right,
     };
-    for ch in text.chars() {
-        if ch == ' ' {
-            cx += 4 + gap;
-        } else if ch.is_ascii() {
-            draw_micro_5x7(disp, &ch.to_string(), cx, y + 2, on, 1, TextAlign::Left);
-            cx += 6 + gap;
-        } else {
-            if let Some(rows) = cjk_glyph_12x12(ch) {
-                for (ry, bits) in rows.iter().enumerate() {
-                    for rx in 0..12_i32 {
-                        if ((bits >> (11 - rx)) & 1) == 1 {
-                            disp.draw_pixel(cx + rx, y + (ry as i32), on);
-                        }
-                    }
-                }
-            }
-            cx += 12 + gap;
-        }
-    }
-    tw
+    draw_u8g2_aligned(&font, text, x, baseline_y, alignment, on, disp);
+    measure_u8g2_width(&font, text) + gap
+}
+
+fn measure_cjk_16(text: &str, gap: i32) -> i32 {
+    let font = FontRenderer::new::<u8g2_font_wqy15_t_gb2312>();
+    measure_u8g2_width(&font, text) + gap
 }
 
 fn glyph_7x11(ch: char) -> Option<(u8, [u8; 11])> {
@@ -1759,6 +1767,27 @@ fn draw_micro_5x7(
         cx += 5 + gap;
     }
     total_w
+}
+
+impl OriginDimensions for FrameDisplay {
+    fn size(&self) -> Size {
+        Size::new(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+    }
+}
+
+impl DrawTarget for FrameDisplay {
+    type Color = BinaryColor;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(point, color) in pixels {
+            self.draw_pixel(point.x, point.y, color == BinaryColor::On);
+        }
+        Ok(())
+    }
 }
 
 struct FrameDisplay {
