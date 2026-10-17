@@ -411,14 +411,108 @@ fn write_http_response(stream: &mut TcpStream, code: u16, content_type: &str, bo
     let _ = stream.write_all(body);
 }
 
+struct WeatherPauseWindow {
+    start_minute: u16,
+    end_minute: u16,
+}
+
+struct WeatherPauseSchedule {
+    windows: Vec<WeatherPauseWindow>,
+}
+
+impl WeatherPauseSchedule {
+    fn parse(value: &str) -> Result<Self, String> {
+        let mut windows = Vec::new();
+        for entry in value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            let (start, end) = entry
+                .split_once('-')
+                .ok_or("WEATHER_PAUSE_WINDOWS 格式应为 HH:MM-HH:MM")?;
+            let start_minute =
+                parse_clock_minute(start).ok_or("WEATHER_PAUSE_WINDOWS 中的开始时间无效")?;
+            let end_minute =
+                parse_clock_minute(end).ok_or("WEATHER_PAUSE_WINDOWS 中的结束时间无效")?;
+            if start_minute == end_minute {
+                return Err("WEATHER_PAUSE_WINDOWS 不接受起止时间相同的时段".into());
+            }
+            windows.push(WeatherPauseWindow {
+                start_minute,
+                end_minute,
+            });
+        }
+        Ok(Self { windows })
+    }
+
+    fn seconds_until_resume_tz(&self, tz_offset_hours: i32) -> Option<u64> {
+        if self.windows.is_empty() {
+            return None;
+        }
+        let now_utc = chrono::Utc::now();
+        let tz = chrono::FixedOffset::east_opt(tz_offset_hours * 3600)
+            .unwrap_or_else(|| chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+        let now = now_utc.with_timezone(&tz).time();
+        use chrono::Timelike;
+        let current_minute = (now.hour() * 60 + now.minute()) as u16;
+        let current_second =
+            u64::from(now.hour()) * 3_600 + u64::from(now.minute()) * 60 + u64::from(now.second());
+        self.windows
+            .iter()
+            .filter(|window| window.contains(current_minute))
+            .map(|window| {
+                let end_second = u64::from(window.end_minute) * 60;
+                (end_second + 86_400 - current_second) % 86_400
+            })
+            .max()
+            .map(|seconds| seconds.max(1))
+    }
+}
+
+impl WeatherPauseWindow {
+    fn contains(&self, minute: u16) -> bool {
+        if self.start_minute < self.end_minute {
+            (self.start_minute..self.end_minute).contains(&minute)
+        } else {
+            minute >= self.start_minute || minute < self.end_minute
+        }
+    }
+}
+
+fn parse_clock_minute(value: &str) -> Option<u16> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 5
+        || bytes[2] != b':'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour = value[..2].parse::<u16>().ok()?;
+    let minute = value[3..].parse::<u16>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(hour * 60 + minute)
+}
+
 fn run_daemon(run_once: bool) -> Result<(), Box<dyn Error>> {
     let api_key = read_api_key()?;
     let pub_cfg = ZectrixPublisherConfig::from_env();
     validate_weather_page_id(pub_cfg.page_id, pub_cfg.allow_reserved_override)?;
 
-    let refresh_interval: u64 = env_parse("WEATHER_REFRESH_SECONDS", 900_u64).max(60);
+    let refresh_interval: u64 = env_parse("WEATHER_REFRESH_SECONDS", 1800_u64).max(60);
     let retry_interval: u64 = env_parse("WEATHER_RETRY_SECONDS", 60_u64).max(10);
     let max_fail_streak: u64 = env_parse("WEATHER_MAX_FAIL_STREAK", 5_u64).max(1);
+    let pause_schedule = WeatherPauseSchedule::parse(&env_or("WEATHER_PAUSE_WINDOWS", "00:00-06:00"))
+        .unwrap_or_else(|e| {
+            eprintln!("警告: WEATHER_PAUSE_WINDOWS 解析失败: {e}，将不暂停");
+            WeatherPauseSchedule { windows: vec![] }
+        });
+    let tz_offset_hours = env_parse("WEATHER_TZ_OFFSET_HOURS", 8_i32);
     let preview_output = std::env::var("WEATHER_PREVIEW_PATH").ok();
 
     let mut provider_cfg = WeatherProviderConfig::from_env();
@@ -448,7 +542,24 @@ fn run_daemon(run_once: bool) -> Result<(), Box<dyn Error>> {
         pub_cfg.device_id, pub_cfg.page_id
     );
 
+    let mut pause_active = false;
     loop {
+        if let Some(until_resume) = pause_schedule.seconds_until_resume_tz(tz_offset_hours) {
+            if !pause_active {
+                eprintln!("天气轮询=夜间暂停 (UTC+{tz_offset_hours} 窗口内)");
+                pause_active = true;
+            }
+            let wait_secs = until_resume.min(60);
+            let (lock, cvar) = &ctrl.wake_signal;
+            if let Ok(guard) = lock.lock() {
+                let _ = cvar.wait_timeout(guard, Duration::from_secs(wait_secs));
+            }
+            continue;
+        } else if pause_active {
+            eprintln!("天气轮询=夜间恢复 (UTC+{tz_offset_hours})");
+            pause_active = false;
+        }
+
         let active_page_id = ctrl.page_id.load(Ordering::SeqCst);
         let forced = ctrl.force_refresh.swap(false, Ordering::SeqCst);
         let prev_hash = if forced {
