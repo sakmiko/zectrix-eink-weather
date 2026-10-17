@@ -92,7 +92,7 @@ fn dispatch_cli() -> Result<(), Box<dyn Error>> {
         let kw = args.get(pos + 1).map(String::as_str).unwrap_or("");
         let cfg = WeatherProviderConfig::from_env();
         let catalog = load_location_catalog(cfg.city_map_file.as_deref());
-        let matches = search_locations(kw, &catalog);
+        let matches = search_locations(kw, cfg.city_map_file.as_deref());
         println!(
             "地址簿匹配结果（共 {} 条，关键词=\"{}\"）：",
             matches.len(),
@@ -123,7 +123,7 @@ fn dispatch_cli() -> Result<(), Box<dyn Error>> {
             .unwrap_or("北京·海淀区");
         let pub_cfg = ZectrixPublisherConfig::from_env();
         let mut cfg = WeatherProviderConfig::from_env();
-        cfg.apply_location_query(q);
+        cfg.apply_location(q);
         let snap = fetch_weather_snapshot(&cfg, pub_cfg.page_id)?;
         println!(
             "【{} · {}】({:.4}, {:.4}) 更新于 {}",
@@ -158,7 +158,7 @@ fn dispatch_cli() -> Result<(), Box<dyn Error>> {
         if let Some(lpos) = args.iter().position(|a| a == "--location")
             && let Some(loc_q) = args.get(lpos + 1)
         {
-            cfg.apply_location_query(loc_q);
+            cfg.apply_location(loc_q);
         }
         let snap = match mode {
             "sunny" => preset_sunny_clear(pub_cfg.page_id),
@@ -282,7 +282,7 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
             .unwrap_or("");
         let cfg = ctrl.provider_cfg.lock().map(|g| g.clone()).unwrap();
         let catalog = load_location_catalog(cfg.city_map_file.as_deref());
-        let matches = search_locations(kw, &catalog);
+        let matches = search_locations(kw, cfg.city_map_file.as_deref());
         let body = serde_json::to_string(&matches).unwrap_or_else(|_| "[]".into());
         write_http_response(&mut stream, 200, "application/json", body.as_bytes());
     } else if let Some(query) = path.strip_prefix("/location?") {
@@ -291,7 +291,7 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
                 if let Some((k, v)) = pair.split_once('=')
                     && (k == "q" || k == "name" || k == "coord")
                 {
-                    cfg.apply_location_query(v);
+                    cfg.apply_location(v);
                 }
             }
         }
@@ -335,7 +335,7 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
             for pair in query.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
                     match k {
-                        "q" | "location" => cfg.apply_location_query(v),
+                        "q" | "location" => cfg.apply_location(v),
                         "name" | "city" => city_q = Some(v.to_owned()),
                         "district" => dist_q = Some(v.to_owned()),
                         "lon" => lon_q = v.parse::<f64>().ok(),
@@ -345,14 +345,14 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
                 }
             }
             if let (Some(lon), Some(lat)) = (lon_q, lat_q) {
-                cfg.apply_location_query(&format!("{lon},{lat}"));
+                cfg.apply_location(&format!("{lon},{lat}"));
             } else if city_q.is_some() || dist_q.is_some() {
                 let combined = format!(
                     "{}{}",
                     city_q.as_deref().unwrap_or(&cfg.city),
                     dist_q.as_deref().unwrap_or("")
                 );
-                cfg.apply_location_query(&combined);
+                cfg.apply_location(&combined);
             }
         }
         if let Ok(mut guard) = ctrl.last_frame_hash.lock() {
@@ -426,7 +426,7 @@ fn run_daemon(run_once: bool) -> Result<(), Box<dyn Error>> {
     if let Some(lpos) = args.iter().position(|a| a == "--location")
         && let Some(loc_q) = args.get(lpos + 1)
     {
-        provider_cfg.apply_location_query(loc_q);
+        provider_cfg.apply_location(loc_q);
     }
     let render_cfg = WeatherRenderConfig::from_env();
     let ctrl = RuntimeControl::new(

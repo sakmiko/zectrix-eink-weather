@@ -2045,8 +2045,17 @@ impl WeatherProviderConfig {
         }
     }
 
-    /// 动态切换查询地区（支持传城市区县名或 `"lon,lat"` 经纬度字符串）
-    pub fn apply_location_query(&mut self, query: &str, district_opt: Option<&str>, lon_opt: Option<f64>, lat_opt: Option<f64>) {
+    /// 动态切换查询地区（便捷单参数版本）
+    pub fn apply_location(&mut self, query: &str) {
+        self.apply_location_query(query, None, None, None);
+    }
+    pub fn apply_location_query(
+        &mut self,
+        query: &str,
+        district_opt: Option<&str>,
+        lon_opt: Option<f64>,
+        lat_opt: Option<f64>,
+    ) {
         let loc = resolve_location_query(
             query,
             district_opt,
