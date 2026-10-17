@@ -9,7 +9,6 @@ use embedded_graphics::geometry::{OriginDimensions, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{DrawTarget, Pixel, Point};
 use image::GrayImage;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use u8g2_fonts::FontRenderer;
@@ -1365,18 +1364,6 @@ fn draw_mini_weather_icon_24(disp: &mut FrameDisplay, kind: WeatherIconKind, x: 
             }
         }
     }
-}
-
-fn measure_cjk_16(text: &str, gap: i32) -> i32 {
-    let mut w = 0_i32;
-    let chars: Vec<char> = text.chars().collect();
-    for (i, ch) in chars.iter().enumerate() {
-        w += if ch.is_ascii() { 8 } else { 16 };
-        if i + 1 < chars.len() {
-            w += gap;
-        }
-    }
-    w
 }
 
 fn draw_u8g2_text<F: u8g2_fonts::Content>(
