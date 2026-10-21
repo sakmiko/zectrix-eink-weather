@@ -50,3 +50,33 @@
    * 检索地址簿：`curl "http://127.0.0.1:9597/locations?q=南山"`
    * 按城市区县切换：`curl "http://127.0.0.1:9597/location?q=深圳南山区"`
    * 按经纬度切换：`curl "http://127.0.0.1:9597/location?q=120.1551,30.2741"`
+
+---
+
+## CLI 交互控制模式 (跨平台支持 Windows & Linux)
+
+本气象伴侣程序原生支持丰富的 CLI 命令行交互功能：
+
+```bash
+# 1. 帮助与版本说明
+zectrix_weather_companion --help
+zectrix_weather_companion --version
+
+# 2. 命令行实时天气查询 (免设备免推流，快速在终端展示气象聚合明细)
+zectrix_weather_companion --query 兰州交通大学
+zectrix_weather_companion --query 103.7198,36.1039
+
+# 3. 检索内置全国区县地址簿
+zectrix_weather_companion --list-locations 安宁
+
+# 4. 本地离线 400x300 1-bit 点阵渲染预览 (模式可选 live, rain, sunny, snow)
+zectrix_weather_companion --preview live weather_live.png
+zectrix_weather_companion --preview rain weather_rain.png
+
+# 5. 探活检查与触发立即上屏刷新
+zectrix_weather_companion --check
+zectrix_weather_companion --trigger-refresh
+
+# 6. 单次推送运行 (用于 CRON 调度或测试)
+zectrix_weather_companion --once
+```

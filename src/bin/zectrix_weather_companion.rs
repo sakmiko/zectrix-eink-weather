@@ -80,6 +80,17 @@ fn main() {
 fn dispatch_cli() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
 
+    // 0.0 帮助与版本说明：--help / -h / --version / -v
+    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+        print_cli_help();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-v" || a == "version") {
+        println!("zectrix_weather_companion v{}", env!("CARGO_PKG_VERSION"));
+        println!("ZECTRIX NOTE4 400x300 1-bit E-Ink Keyless Multi-Source Weather Station");
+        return Ok(());
+    }
+
     // 支持 --env <path> 指定自定义环境配置文件
     if let Some(pos) = args.iter().position(|a| a == "--env")
         && let Some(env_file) = args.get(pos + 1)
@@ -184,6 +195,33 @@ fn dispatch_cli() -> Result<(), Box<dyn Error>> {
 
     let run_once = args.iter().any(|a| a == "--once");
     run_daemon(run_once)
+}
+
+fn print_cli_help() {
+    println!(
+        r#"ZECTRIX NOTE4 纯代码免Key多源气象站伴侣 CLI (v{})
+
+用法:
+  zectrix_weather_companion [命令/选项]
+
+基础选项:
+  --help, -h               显示此帮助信息
+  --version, -v            显示版本信息
+  --env <path>             指定自定义环境配置文件路径（默认加载 .env / 系统环境）
+
+操作模式:
+  --query [城市/区县/坐标] 实时从配置源拉取并打印指定地点天气明细终端摘要
+  --list-locations [关键词] 检索内置全国区县经纬度与站点代码地址簿
+  --preview [模式] [文件]   在本地离线生成 400x300 1-bit 墨水屏预览图（模式可选: live|rain|sunny|snow，默认 rain）
+  --check                  查询后台常驻服务的健康状态探针（默认 127.0.0.1:9597）
+  --trigger-refresh        触发后台服务立即拉取最新气象数据并推送上屏
+  --once                   单次运行：完成数据抓取和推送后立即退出
+
+常驻运行:
+  直接运行程序无参数时，将作为守护服务启动，按照环境变量 WEATHER_REFRESH_SECONDS 持续同步并推送。
+"#,
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 fn query_local_control(request_line: &str) -> Result<(), Box<dyn Error>> {

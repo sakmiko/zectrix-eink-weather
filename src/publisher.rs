@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::WeatherRenderOutput;
 use crate::provider::{env_bool, env_or, env_parse, load_dotenv_if_present};
 
-pub const DEFAULT_DEVICE_ID: &str = "20:6E:F1:B6:6A:C4";
+pub const DEFAULT_DEVICE_ID: &str = "";
 pub const DEFAULT_WEATHER_PAGE_ID: u8 = 2;
 pub const CODEX_RESERVED_PAGE_ID: u8 = 3;
 
