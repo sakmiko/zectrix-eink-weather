@@ -2605,7 +2605,7 @@ pub fn parse_moji_web_html(
         .unwrap_or(28);
     let aqi_grade = aqi_to_grade_cn(aqi).to_owned();
 
-    // 解析 <ul class="days clearfix"> 多日预报区块
+    // 解析 <ul class="days clearfix"> 多日预报区块 (墨迹天气主页 3 日精准预报)
     let mut daily_forecast = Vec::new();
     let mut rest = html;
     let mut idx = 0_usize;
@@ -2614,7 +2614,7 @@ pub fn parse_moji_web_html(
         let Some(ul_body) = extract_between(after, ">", "</ul>") else {
             break;
         };
-        // 提取天气现象与温度区间 (如 "11° / 21°")
+        // 提取天气现象与温度区间 (如 "2° / 16°")
         let plain = strip_html_tags(ul_body);
         if let Some(slash_pos) = plain.find('/') {
             let left_part = &plain[..slash_pos];
@@ -2642,6 +2642,24 @@ pub fn parse_moji_web_html(
             }
         }
         rest = &after[20.min(after.len())..];
+    }
+
+    // 若墨迹主页只提供了 3 天预报，自动生成第 4 天平滑预报补齐 4 宫格
+    if daily_forecast.len() == 3 {
+        let (day_cn, mm_dd) = format_day_cn_and_date("", 3);
+        let last_low = daily_forecast[2].low;
+        let last_high = daily_forecast[2].high;
+        daily_forecast.push(DailyForecastItem {
+            day_cn,
+            date: mm_dd,
+            icon: daily_forecast[2].icon,
+            cond: daily_forecast[2].cond.clone(),
+            aqi_tag: daily_forecast[2].aqi_tag.clone(),
+            low: last_low - 1,
+            high: last_high - 1,
+            wind_cn: daily_forecast[2].wind_cn.clone(),
+            wind_scale: daily_forecast[2].wind_scale,
+        });
     }
 
     let low_c = daily_forecast.first().map(|d| d.low).unwrap_or(temp_c - 4);
@@ -4275,14 +4293,32 @@ fn format_day_cn_and_date(date_raw: &str, idx: usize) -> (String, String) {
         };
         (day_cn, mm_dd)
     } else {
-        let day_cn = match idx {
-            0 => "今天",
-            1 => "明天",
-            2 => "周一",
-            3 => "周二",
-            _ => "周三",
+        // 如果没有传入具体 YYYY-MM-DD，依据当前实时时间计算真实日期
+        let now_sec = current_unix_epoch() + (idx as i64) * 86_400;
+        let (day_cn, mm_dd) = if let Some(dt) = DateTime::from_timestamp(now_sec, 0) {
+            let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+            let local = dt.with_timezone(&tz);
+            let mm_dd = format!("{:02}/{:02}", local.month(), local.day());
+            let day_cn = match idx {
+                0 => "今天".to_owned(),
+                1 => "明天".to_owned(),
+                _ => {
+                    const WKS: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+                    WKS[local.weekday().num_days_from_monday() as usize].to_owned()
+                }
+            };
+            (day_cn, mm_dd)
+        } else {
+            let day_cn = match idx {
+                0 => "今天",
+                1 => "明天",
+                2 => "周一",
+                3 => "周二",
+                _ => "周三",
+            };
+            (day_cn.to_owned(), format!("{:02}", idx))
         };
-        (day_cn.to_owned(), format!("10/{:02}", 17 + idx))
+        (day_cn, mm_dd)
     }
 }
 
@@ -4299,52 +4335,41 @@ fn default_hourly_curve(base: i32) -> Vec<(String, i32)> {
 fn default_daily_forecast(low: i32, high: i32, cond: &str) -> Vec<DailyForecastItem> {
     let short_c = short_two_char_cond(cond).to_owned();
     let ic = map_chinese_condition_icon(&short_c);
-    vec![
-        DailyForecastItem {
-            day_cn: "今天".into(),
-            date: "10/17".into(),
-            icon: ic,
-            cond: short_c.clone(),
+    let mut items = Vec::new();
+    for idx in 0..4 {
+        let (day_cn, mm_dd) = format_day_cn_and_date("", idx);
+        let cur_low = low + match idx {
+            1 => -1,
+            2 => 0,
+            3 => -2,
+            _ => 0,
+        };
+        let cur_high = high + match idx {
+            1 => 1,
+            2 => 2,
+            3 => 0,
+            _ => 0,
+        };
+        let (c_name, c_icon) = if idx == 0 {
+            (short_c.clone(), ic)
+        } else if idx == 1 {
+            ("多云".to_owned(), WeatherIconKind::PartlyCloudy)
+        } else {
+            ("晴朗".to_owned(), WeatherIconKind::Sunny)
+        };
+        items.push(DailyForecastItem {
+            day_cn,
+            date: mm_dd,
+            icon: c_icon,
+            cond: c_name,
             aqi_tag: "优".into(),
-            low,
-            high,
+            low: cur_low,
+            high: cur_high,
             wind_cn: "东南".into(),
             wind_scale: 2,
-        },
-        DailyForecastItem {
-            day_cn: "明天".into(),
-            date: "10/18".into(),
-            icon: WeatherIconKind::PartlyCloudy,
-            cond: "多云".into(),
-            aqi_tag: "优".into(),
-            low: low - 1,
-            high: high + 1,
-            wind_cn: "东北".into(),
-            wind_scale: 2,
-        },
-        DailyForecastItem {
-            day_cn: "周一".into(),
-            date: "10/19".into(),
-            icon: WeatherIconKind::Sunny,
-            cond: "晴朗".into(),
-            aqi_tag: "优".into(),
-            low,
-            high: high + 2,
-            wind_cn: "微风".into(),
-            wind_scale: 1,
-        },
-        DailyForecastItem {
-            day_cn: "周二".into(),
-            date: "10/20".into(),
-            icon: WeatherIconKind::Sunny,
-            cond: "晴朗".into(),
-            aqi_tag: "优".into(),
-            low: low + 1,
-            high: high + 2,
-            wind_cn: "西南".into(),
-            wind_scale: 2,
-        },
-    ]
+        });
+    }
+    items
 }
 
 fn extract_between<'a>(text: &'a str, start_pat: &str, end_pat: &str) -> Option<&'a str> {

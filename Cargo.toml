@@ -1,6 +1,6 @@
 [package]
 name = "zectrix-eink-weather"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "400x300 1-bit E-Ink Weather Station for ZECTRIX NOTE4 (Keyless Multi-Source Web & API Aggregator)"
 
