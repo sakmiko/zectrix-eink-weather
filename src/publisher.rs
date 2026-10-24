@@ -57,11 +57,24 @@ pub enum ZectrixPublishError {
     Unavailable,
 }
 
-pub fn validate_weather_page_id(page_id: u8, _allow_page_3: bool) -> Result<u8, ZectrixPublishError> {
+pub fn validate_weather_page_id(page_id: u8, allow_page_3: bool) -> Result<u8, ZectrixPublishError> {
+    validate_weather_page_id_with_reserved(page_id, &[CODEX_RESERVED_PAGE_ID], allow_page_3)
+}
+
+pub fn validate_weather_page_id_with_reserved(
+    page_id: u8,
+    reserved_pages: &[u8],
+    allow_reserved_override: bool,
+) -> Result<u8, ZectrixPublishError> {
     if !(1..=5).contains(&page_id) {
         return Err(ZectrixPublishError::InvalidConfiguration(
             "ZECTRIX_PAGE_ID 必须在 1 到 5 之间".into(),
         ));
+    }
+    if reserved_pages.contains(&page_id) && !allow_reserved_override {
+        return Err(ZectrixPublishError::InvalidConfiguration(format!(
+            "第 {page_id} 页已被预留；如需覆盖请显式设置 ZECTRIX_ALLOW_RESERVED_OVERRIDE=true"
+        )));
     }
     Ok(page_id)
 }
@@ -88,7 +101,11 @@ impl ZectrixPublisher {
         let mut cfg = ZectrixPublisherConfig::from_env();
         cfg.base_url = base_url.into().trim_end_matches('/').to_owned();
         cfg.device_id = device_id.into();
-        cfg.page_id = validate_weather_page_id(page_id, allow_page_3)?;
+        cfg.page_id = validate_weather_page_id_with_reserved(
+            page_id,
+            &cfg.reserved_pages,
+            allow_page_3 || cfg.allow_reserved_override,
+        )?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -105,6 +122,25 @@ impl ZectrixPublisher {
                 ZectrixPublishError::InvalidConfiguration("HTTP 客户端初始化失败".into())
             })?;
         Ok(Self { client, cfg })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_pages_require_explicit_override() {
+        assert!(validate_weather_page_id(3, false).is_err());
+        assert_eq!(validate_weather_page_id(3, true).unwrap(), 3);
+        assert!(validate_weather_page_id_with_reserved(2, &[2, 3], false).is_err());
+        assert_eq!(
+            validate_weather_page_id_with_reserved(2, &[2, 3], true).unwrap(),
+            2
+        );
+        assert_eq!(validate_weather_page_id(1, false).unwrap(), 1);
+        assert!(validate_weather_page_id(0, true).is_err());
+        assert!(validate_weather_page_id(6, true).is_err());
     }
 }
 

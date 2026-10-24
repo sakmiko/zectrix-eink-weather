@@ -13,13 +13,15 @@ use zectrix_eink_weather::{
     FramePublisher, PublishDecision, WeatherProviderConfig, WeatherRenderConfig, WeatherSnapshot,
     ZectrixPublisher, ZectrixPublisherConfig, env_or, env_parse, fetch_weather_snapshot,
     load_dotenv_if_present, load_location_catalog, preset_cold_snow, preset_rain_radar,
-    preset_sunny_clear, render_weather_dashboard, search_locations, validate_weather_page_id,
+    preset_sunny_clear, render_weather_dashboard, search_locations,
+    validate_weather_page_id_with_reserved,
 };
 
 struct RuntimeControl {
     started_at: u64,
     device_id: String,
     allow_page_3: bool,
+    reserved_pages: Vec<u8>,
     page_id: AtomicU8,
     last_ok_at: AtomicU64,
     push_success_count: AtomicU64,
@@ -38,6 +40,7 @@ impl RuntimeControl {
         device_id: String,
         page_id: u8,
         allow_page_3: bool,
+        reserved_pages: Vec<u8>,
         max_fail_streak: u64,
         provider_cfg: WeatherProviderConfig,
         render_cfg: WeatherRenderConfig,
@@ -46,6 +49,7 @@ impl RuntimeControl {
             started_at: unix_time_u64(),
             device_id,
             allow_page_3,
+            reserved_pages,
             page_id: AtomicU8::new(page_id),
             last_ok_at: AtomicU64::new(0),
             push_success_count: AtomicU64::new(0),
@@ -70,7 +74,6 @@ impl RuntimeControl {
 }
 
 fn main() {
-    load_dotenv_if_present();
     if let Err(err) = dispatch_cli() {
         eprintln!("ZECTRIX 气象站服务异常退出：{err}");
         std::process::exit(1);
@@ -79,6 +82,14 @@ fn main() {
 
 fn dispatch_cli() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
+    // --env 优先于默认 .env；已有系统环境变量始终优先于环境文件。
+    if let Some(pos) = args.iter().position(|a| a == "--env")
+        && let Some(env_file) = args.get(pos + 1)
+    {
+        zectrix_eink_weather::load_dotenv_from_path(env_file);
+    } else {
+        load_dotenv_if_present();
+    }
 
     // 0.0 帮助与版本说明：--help / -h / --version / -v
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
@@ -89,13 +100,6 @@ fn dispatch_cli() -> Result<(), Box<dyn Error>> {
         println!("zectrix_weather_companion v{}", env!("CARGO_PKG_VERSION"));
         println!("ZECTRIX NOTE4 400x300 1-bit E-Ink Keyless Multi-Source Weather Station");
         return Ok(());
-    }
-
-    // 支持 --env <path> 指定自定义环境配置文件
-    if let Some(pos) = args.iter().position(|a| a == "--env")
-        && let Some(env_file) = args.get(pos + 1)
-    {
-        zectrix_eink_weather::load_dotenv_from_path(env_file);
     }
 
     // 0. 快速地址簿检索：--list-locations [keyword]
@@ -250,6 +254,14 @@ fn spawn_control_server(ctrl: Arc<RuntimeControl>) -> Option<thread::JoinHandle<
         Ok(v) => v,
         Err(_) => "127.0.0.1:9597".to_owned(),
     };
+    // 页面切换和地区修改接口没有鉴权，只允许本机访问。
+    if !addr
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+    {
+        eprintln!("天气控制端只能监听 loopback 地址：{addr}");
+        return None;
+    }
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -298,40 +310,58 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
         let healthy = fails < ctrl.max_fail_streak && last_ok > 0;
         let code = if healthy { 200 } else { 503 };
         let status_str = if healthy { "ok" } else { "degraded" };
-        let body = format!(
-            "{{\"status\":\"{status_str}\",\"healthy\":{healthy},\"device_id\":\"{}\",\"page_id\":{page_id},\"location\":\"{city_str}\",\"temp_c\":{temp_val},\"condition\":\"{cond_str}\",\"last_frame_sha256\":\"{last_hash}\",\"uptime_seconds\":{},\"last_ok_age_seconds\":{},\"push_success_count\":{ok_cnt},\"push_fail_streak\":{fails}}}",
-            ctrl.device_id,
-            now_u64.saturating_sub(ctrl.started_at),
-            if last_ok == 0 {
+        let body = serde_json::json!({
+            "status": status_str,
+            "healthy": healthy,
+            "device_id": &ctrl.device_id,
+            "page_id": page_id,
+            "location": city_str,
+            "temp_c": temp_val,
+            "condition": cond_str,
+            "last_frame_sha256": last_hash,
+            "uptime_seconds": now_u64.saturating_sub(ctrl.started_at),
+            "last_ok_age_seconds": if last_ok == 0 {
                 u64::MAX
             } else {
                 now_u64.saturating_sub(last_ok)
             },
-        );
+            "push_success_count": ok_cnt,
+            "push_fail_streak": fails,
+        }).to_string();
         write_http_response(&mut stream, code, "application/json", body.as_bytes());
     } else if path.starts_with("/refresh") {
         ctrl.trigger_immediate_refresh();
         let body = br#"{"status":"triggered","message":"immediate weather refresh scheduled"}"#;
         write_http_response(&mut stream, 200, "application/json", body);
     } else if let Some(query) = path.strip_prefix("/locations") {
-        let kw = query
+        let kw_raw = query
             .strip_prefix("?q=")
             .or_else(|| query.strip_prefix("?keyword="))
             .unwrap_or("");
+        let Some(kw) = decode_query_component(kw_raw) else {
+            write_http_response(&mut stream, 400, "application/json", br#"{"error":"invalid query encoding"}"#);
+            return;
+        };
         let cfg = ctrl.provider_cfg.lock().map(|g| g.clone()).unwrap();
-        let catalog = load_location_catalog(cfg.city_map_file.as_deref());
-        let matches = search_locations(kw, cfg.city_map_file.as_deref());
+        let matches = search_locations(&kw, cfg.city_map_file.as_deref());
         let body = serde_json::to_string(&matches).unwrap_or_else(|_| "[]".into());
         write_http_response(&mut stream, 200, "application/json", body.as_bytes());
     } else if let Some(query) = path.strip_prefix("/location?") {
-        if let Ok(mut cfg) = ctrl.provider_cfg.lock() {
-            for pair in query.split('&') {
-                if let Some((k, v)) = pair.split_once('=')
-                    && (k == "q" || k == "name" || k == "coord")
-                {
-                    cfg.apply_location(v);
-                }
+        let mut location = None;
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=')
+                && (key == "q" || key == "name" || key == "coord")
+            {
+                location = decode_query_component(value);
+                break;
             }
+        }
+        let Some(location) = location else {
+            write_http_response(&mut stream, 400, "application/json", br#"{"error":"missing or invalid location"}"#);
+            return;
+        };
+        if let Ok(mut cfg) = ctrl.provider_cfg.lock() {
+            cfg.apply_location(&location);
         }
         if let Ok(mut guard) = ctrl.last_frame_hash.lock() {
             *guard = None;
@@ -350,7 +380,14 @@ fn handle_control_client(mut stream: TcpStream, ctrl: &Arc<RuntimeControl>) {
             .unwrap_or("")
             .parse::<u8>()
             .ok()
-            .and_then(|pid| validate_weather_page_id(pid, ctrl.allow_page_3).ok());
+            .and_then(|pid| {
+                validate_weather_page_id_with_reserved(
+                    pid,
+                    &ctrl.reserved_pages,
+                    ctrl.allow_page_3,
+                )
+                .ok()
+            });
         if let Some(new_page) = parsed {
             ctrl.page_id.store(new_page, Ordering::SeqCst);
             if let Ok(mut guard) = ctrl.last_frame_hash.lock() {
@@ -449,6 +486,50 @@ fn write_http_response(stream: &mut TcpStream, code: u16, content_type: &str, bo
     let _ = stream.write_all(body);
 }
 
+fn decode_query_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let hex = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                let high = hex(*bytes.get(index + 1)?)?;
+                let low = hex(*bytes.get(index + 2)?)?;
+                decoded.push(high << 4 | low);
+                index += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn chinese_location_query_is_decoded_and_invalid_hex_is_rejected() {
+        assert_eq!(decode_query_component("%E5%85%B0%E5%B7%9E"), Some("兰州".into()));
+        assert_eq!(decode_query_component("A+B"), Some("A B".into()));
+        assert_eq!(decode_query_component("%G0"), None);
+        assert_eq!(decode_query_component("%E5%FF"), None);
+    }
+}
+
 struct WeatherPauseWindow {
     start_minute: u16,
     end_minute: u16,
@@ -540,7 +621,11 @@ fn parse_clock_minute(value: &str) -> Option<u16> {
 fn run_daemon(run_once: bool) -> Result<(), Box<dyn Error>> {
     let api_key = read_api_key()?;
     let pub_cfg = ZectrixPublisherConfig::from_env();
-    validate_weather_page_id(pub_cfg.page_id, pub_cfg.allow_reserved_override)?;
+    validate_weather_page_id_with_reserved(
+        pub_cfg.page_id,
+        &pub_cfg.reserved_pages,
+        pub_cfg.allow_reserved_override,
+    )?;
 
     let refresh_interval: u64 = env_parse("WEATHER_REFRESH_SECONDS", 1800_u64).max(60);
     let retry_interval: u64 = env_parse("WEATHER_RETRY_SECONDS", 60_u64).max(10);
@@ -565,6 +650,7 @@ fn run_daemon(run_once: bool) -> Result<(), Box<dyn Error>> {
         pub_cfg.device_id.clone(),
         pub_cfg.page_id,
         pub_cfg.allow_reserved_override,
+        pub_cfg.reserved_pages.clone(),
         max_fail_streak,
         provider_cfg,
         render_cfg,

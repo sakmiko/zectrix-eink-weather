@@ -30,6 +30,7 @@ pub use provider::{
 pub use publisher::{
     CODEX_RESERVED_PAGE_ID, DEFAULT_DEVICE_ID, DEFAULT_WEATHER_PAGE_ID, FramePublisher,
     ZectrixPublishError, ZectrixPublisher, ZectrixPublisherConfig, validate_weather_page_id,
+    validate_weather_page_id_with_reserved,
 };
 
 pub const DISPLAY_WIDTH: u32 = 400;

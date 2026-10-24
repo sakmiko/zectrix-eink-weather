@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike, Utc};
@@ -1864,7 +1865,7 @@ impl ProviderPreference {
             "aggregate" | "agg" | "multi" | "fusion" | "聚合" => Self::Aggregate,
             "auto" => Self::Auto,
             "nmc" | "cma" | "中央台" => Self::Nmc,
-            "weather_cn" | "weather_cn_web" | "weather.com.cn" | "中国天气网" => {
+            "weathercn" | "weather_cn" | "weather_cn_web" | "weather.com.cn" | "中国天气网" => {
                 Self::WeatherCnWeb
             }
             "moji_web" | "tianqi.moji.com" | "墨迹网页" => Self::MojiWeb,
@@ -2182,14 +2183,23 @@ pub fn fetch_aggregated_weather(
     let mut snapshots = Vec::new();
     let mut last_err = WeatherProviderError::Http("聚合信源列表为空".into());
 
-    for &pref in &cfg.aggregate_sources {
-        if let Some(res) = try_single_provider(client, cfg, pref, page_id) {
-            match res {
-                Ok(snap) => snapshots.push(snap),
-                Err(e) => last_err = e,
+    // HTTP 请求互不依赖；并发采集避免累加多个源的超时等待。
+    // 按配置顺序 join，使首选源及缺省描述字段的优先级保持稳定。
+    thread::scope(|scope| {
+        let handles = cfg
+            .aggregate_sources
+            .iter()
+            .map(|&pref| scope.spawn(move || try_single_provider(client, cfg, pref, page_id)))
+            .collect::<Vec<_>>();
+        for handle in handles {
+            match handle.join() {
+                Ok(Some(Ok(snapshot))) => snapshots.push(snapshot),
+                Ok(Some(Err(error))) => last_err = error,
+                Ok(None) => {}
+                Err(_) => last_err = WeatherProviderError::Parse("天气采集线程异常退出".into()),
             }
         }
-    }
+    });
 
     if snapshots.is_empty() {
         return Err(last_err);
@@ -2378,7 +2388,7 @@ pub fn parse_weather_com_cn_web_payload(
     let mut temp_c = sk_json
         .as_ref()
         .and_then(|j| parse_i32_opt(j.get("temp")))
-        .unwrap_or(20);
+        .ok_or_else(|| WeatherProviderError::Parse("中国天气网缺少有效实时温度".into()))?;
     let humidity = sk_json
         .as_ref()
         .and_then(|j| j.get("SD").and_then(Value::as_str))
@@ -2585,7 +2595,7 @@ pub fn parse_moji_web_html(
         .ok_or_else(|| WeatherProviderError::Parse("墨迹网页缺少 wea_weather 区块".into()))?;
     let temp_c = extract_between(wea_block, "<em>", "</em>")
         .and_then(|s| s.trim().parse::<i32>().ok())
-        .unwrap_or(20);
+        .ok_or_else(|| WeatherProviderError::Parse("墨迹网页缺少有效实时温度".into()))?;
     let condition = extract_between(wea_block, "<b>", "</b>")
         .map(|s| strip_html_tags(s).trim().to_owned())
         .filter(|s| !s.is_empty())
@@ -3563,7 +3573,7 @@ pub fn parse_nmc_forecast_html(
 ) -> Result<WeatherSnapshot, WeatherProviderError> {
     let temp_c = extract_between(html, "id=\"realTemperature\"", "</div>")
         .and_then(extract_first_i32)
-        .unwrap_or(18);
+        .ok_or_else(|| WeatherProviderError::Parse("中央气象台网页缺少有效实时温度".into()))?;
     let humidity = extract_between(html, "id=\"realHumidity\"", "</div>")
         .and_then(extract_first_u8)
         .unwrap_or(55);
@@ -3633,7 +3643,8 @@ pub fn parse_nmc_cma_json_with_cfg(
     let temp_c = real_w
         .get("temperature")
         .and_then(Value::as_f64)
-        .unwrap_or(18.0)
+        .filter(|value| value.is_finite() && (-90.0..=65.0).contains(value))
+        .ok_or_else(|| WeatherProviderError::Parse("中央气象台缺少有效实时温度".into()))?
         .round() as i32;
     let feels_like = real_w
         .get("feelst")
@@ -4536,4 +4547,29 @@ pub fn non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn documented_weathercn_alias_selects_the_right_provider() {
+        assert_eq!(
+            ProviderPreference::from_str_lossy("weathercn"),
+            ProviderPreference::WeatherCnWeb
+        );
+    }
+
+    #[test]
+    fn malformed_weather_sources_do_not_fabricate_current_temperatures() {
+        let config = WeatherProviderConfig::from_env();
+        assert!(parse_weather_com_cn_web_payload("", "", &config, 2).is_err());
+        assert!(parse_moji_web_html("<div class=\"wea_weather\"><em>?</em></div>", &config, 2).is_err());
+        assert!(parse_nmc_forecast_html("<html>unavailable</html>", &config, 2).is_err());
+        let missing_temperature = serde_json::json!({
+            "data": {"real": {"weather": {"info": "晴"}}}
+        });
+        assert!(parse_nmc_cma_json_with_cfg(&missing_temperature, &config, 2).is_err());
+    }
 }

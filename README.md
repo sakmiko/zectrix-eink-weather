@@ -19,7 +19,7 @@
      3. **直接传经纬度坐标**：`WEATHER_LOCATION="116.2980,39.9599"`（自动识别并纠正经纬度顺序）或设置 `WEATHER_LON` + `WEATHER_LAT`。系统通过 **Haversine 球面大圆距离算法** 自动匹配距离最近的区县站点（获取其区县名与网页代码），同时保留用户输入的精确经纬度用于 1KM 网格气象查询。
 
 3. **默认免 Key 多源聚合引擎 + 天气网页深度解析（`WEATHER_PROVIDER=aggregate`）**：
-   * 默认无需配置任何商业 API Key，启动即并发拉取并融合以下 **4 大免 Key 数据源（含 3 个国内权威天气网页解析器 + 1 个全球高精度经纬度网格源）**：
+   * 默认无需配置任何商业 API Key，启动即并发拉取并融合以下 **4 大免 Key 数据源（含 3 个国内天气网页解析器 + 1 个全球经纬度网格源）**：
 
 | 免 Key 数据源 | 接入方式与解析目标 | 核心提取字段 | 优势互补作用 |
 | :--- | :--- | :--- | :--- |
@@ -27,6 +27,10 @@
 | **[中国天气网网页解析](https://www.weather.com.cn/)** (`weathercn`) | 1. 预报页 `http://www.weather.com.cn/weather1d/{code}.shtml` 内嵌 `var hour3data` 与 `hidden_title`<br>2. 实况脚本 `http://d1.weather.com.cn/sk_2d/{code}.html` (`var dataSK`) | 区县级实时温度、相对湿度、风向风级、气压、AQI、未来 24H 逐 3 小时温度曲线、7 日天气与温差 | 覆盖全国全部 2800+ 区县，网页内嵌 JSON 脚本结构稳定 |
 | **[墨迹天气网页版 HTML 解析](https://tianqi.moji.com/)** (`moji_web`) | 解析 `https://tianqi.moji.com/weather/china/{moji_slug}` DOM 节点 (`div.wea_weather`、`div.wea_about`、`div.wea_alert`、`ul.days`) | 实时温度、`<b>` 精准天气现象、湿度、风级、AQI 胶囊、预警胶囊及未来多日预报行 | 国内本土化天气描述最贴近日常习惯，区县级页面免鉴权直出 |
 | **[Open-Meteo 经纬度网格源](https://open-meteo.com/)** (`open_meteo`) | `GET https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=...&minutely_15=precipitation&hourly=...&daily=...` | 任意经纬度实时温度、体感、湿度、气压、紫外线、日落时间、**未来两小时 15 分钟级降水雷达柱**、24H 逐时温度 | 零 Key 门槛支持全球任意经纬度坐标，补齐免 Key 源的短临分钟级降水雷达柱与逐时曲线 |
+
+信源采集并发执行，多个 HTTP 超时不会串行累加。配置项 `WEATHER_AGGREGATE_SOURCES` 支持 `weathercn` 和 `weather_cn_web` 两种中国天气网别名。网页与接口若缺失有效的实时温度则拒绝该来源，不能将固定温度作为真实观测值；其他辅助气象字段的回退策略仍需与实际数据源逐项核验。
+
+设备通道默认保留第 3 页给 Codex 看板，`ZECTRIX_RESERVED_PAGES` 可以配置其他受保护页面；只有明确开启 `ZECTRIX_ALLOW_RESERVED_OVERRIDE=true` 才能覆盖。HTTP 控制端只能绑定 loopback 地址，远程控制请使用 SSH/Tailscale 转发。启动时如指定 `--env <path>`，使用指定文件而不预先读取默认 `.env`，系统环境变量仍优先。
 
    * **多源中位数共识融合算法 (`aggregate_weather_snapshots`)**：
      * **抗异常值中位数融合**：对多源返回的实时温度 (`temp_c`)、体感温度 (`feels_like`)、湿度 (`humidity`)、气压 (`pressure`)、空气质量 (`aqi`)、逐时曲线 (`hourly_points`) 及未来 4 日高低温分别计算**中位数（Median Consensus）**，彻底消除单一网页改版、缓存延迟或局部站点异常带来的跳变。
