@@ -2795,12 +2795,19 @@ pub fn parse_open_meteo_json(
         json.pointer("/hourly/temperature_2m")
             .and_then(Value::as_array),
     ) {
-        for i in (0..times.len().min(temps.len()))
+        // 动态定位当前时间之后的节点，保证预报随时间动态推进
+        let now_prefix = format_tz_yyyy_mm_dd_hh(current_unix_epoch(), cfg.tz_offset_seconds);
+        let start_idx = times
+            .iter()
+            .position(|t| t.as_str().unwrap_or(\"\") >= now_prefix.as_str())
+            .unwrap_or(0);
+
+        for i in (start_idx..times.len().min(temps.len()))
             .step_by(cfg.hourly_step_hours.max(1))
             .take(cfg.hourly_points_count)
         {
-            let tm = times[i].as_str().unwrap_or("");
-            let tv = parse_i32_lossy( Some(&temps[i]), temp_c);
+            let tm = times[i].as_str().unwrap_or(\"\");
+            let tv = parse_i32_lossy(Some(&temps[i]), temp_c);
             hourly_points.push((extract_hour_label(tm), tv));
         }
     }
@@ -4496,6 +4503,24 @@ fn parse_i32_opt(val: Option<&Value>) -> Option<i32> {
 
 fn parse_i32_lossy(val: Option<&Value>, default: i32) -> i32 {
     parse_i32_opt(val).unwrap_or(default)
+}
+
+fn format_tz_yyyy_mm_dd_hh(epoch_secs: i64, tz_offset_seconds: i32) -> String {
+    let tz = FixedOffset::east_opt(tz_offset_seconds)
+        .or_else(|| FixedOffset::east_opt(DEFAULT_TZ_OFFSET_SECONDS))
+        .unwrap();
+    if let Some(utc) = DateTime::<Utc>::from_timestamp(epoch_secs, 0) {
+        let local = utc.with_timezone(&tz);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:00",
+            local.year(),
+            local.month(),
+            local.day(),
+            local.hour()
+        )
+    } else {
+        "2026-01-01T12:00".to_owned()
+    }
 }
 
 fn format_tz_hhmm(epoch_secs: i64, tz_offset_seconds: i32) -> String {
